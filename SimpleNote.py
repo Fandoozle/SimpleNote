@@ -1,20 +1,34 @@
-from typing import Dict, Optional, Union, Callable, Any
+import os
+import time
+import json
+
+from typing import Dict, Optional, Union, Callable, Any, Literal
+
 import tkinter as tk
 import tkinterdnd2 as tkdnd
 from tkinter import Menu, Text, messagebox, filedialog, simpledialog, Toplevel, Label, Entry, Button, font as tkFont
-import os, json, time
-from tkcalendar import Calendar
-from typing import Optional, Literal
 from tkinter import ttk
-from tkinter import Tk, Text, RIGHT, Y, END, BOTH
+
+from tkcalendar import Calendar
+from config_manager import ConfigManager
+
 
 def load_config(config_file: str = "config.json") -> Dict[str, Union[int, str]]:
-    """Load configuration settings from a JSON file."""
+    """
+    Load configuration settings from a JSON file.
+
+    If the file does not exist or contains invalid JSON, it returns default settings.
+
+    :param config_file: Path to the configuration file (default: "config.json")
+    :return: A dictionary with configuration settings
+    """
     try:
         with open(config_file, 'r') as file:
-            config = json.load(file)
-        return config
-    except (FileNotFoundError, json.JSONDecodeError):
+            return json.load(file)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        # Log the error for debugging
+        print(f"Error loading config: {e}")
+        # Return default configuration if file is missing or corrupted
         return {
             "autosave_delay": 60000,  # 1 minute in milliseconds
             "window_width": 800,
@@ -25,17 +39,27 @@ def load_config(config_file: str = "config.json") -> Dict[str, Union[int, str]]:
 
 class TextEditor:
     def __init__(self, master: tk.Tk):
+        """
+        Initialize the TextEditor with the main window.
+
+        Sets up the basic configuration, UI elements, and event bindings.
+        """
         self.master = master
-        self.config: Dict[str, Union[int, str]] = load_config()
+        self.config_manager = ConfigManager()
+        self.config: Dict[str, Union[int, str]] = self.config_manager.config
         self.master.title('Simple Note')
 
         self.style = ttk.Style()
-        self.style.theme_use('clam')  # or any other theme that supports custom styling
+        self.style.theme_use('clam')  # Use 'clam' theme for custom styling
 
         # Load configuration and themes
-        self.config: Dict[str, Union[int, str]] = load_config()
         self.themes: Dict[str, Dict[str, str]] = self.load_themes()
         self.current_theme: Dict[str, str] = self.themes.get("dark", self.themes["light"])
+
+        # Autosave configuration
+        self.autosave_delay: int = self.config_manager.get("autosave_delay", 60000)
+        print(f"Autosave delay set to {self.autosave_delay}")
+        self.master.after(self.autosave_delay, self.check_for_changes)
 
         # Font settings
         self.font_family: str = "Arial"
@@ -43,202 +67,214 @@ class TextEditor:
         self.font_color: str = self.current_theme.get("text", "#000000")  # Default text color
 
         # Create main text frame
-        self.text_frame: tk.Frame = tk.Frame(self.master, 
-                                             bg=self.current_theme["background"], 
-                                             highlightthickness=0, bd=0)
-        self.text_frame.pack(expand=True, fill=tk.BOTH)  # Expand to fill the main window
+        self.text_frame = tk.Frame(self.master, 
+                                   bg=self.current_theme["background"], 
+                                   highlightthickness=0, bd=0)
+        self.text_frame.pack(expand=True, fill=tk.BOTH)
 
-        self.create_text_widget()  # Ensure this is called before binding shortcuts
-        self.text.focus_set()  # Set focus to the text widget
+        self.create_text_widget()
+        self.text.focus_set()  # Focus on the text widget for immediate input
 
         self.create_status_bar()
-        self.apply_theme(self.current_theme)
+        self.update_status_bar()  # Initial update
+        self.set_theme(self.current_theme)
 
-        self.find_replace_open: bool = False  # Flag to check if find/replace dialog is open
+        self.set_theme(self.current_theme)  # Call set_theme after all attributes are initialized
 
-        self.bind_keyboard_shortcuts()  # Bind all necessary keyboard shortcuts
-        self.create_menu()  # Create the menu bar
+        self.find_replace_open = False  # Flag to check if find/replace dialog is open
+
+        self.bind_keyboard_shortcuts()
+        self.create_menu()
 
         # File management attributes
-        self.file_path: Optional[str] = None  # Path of the currently opened file
-        self.last_saved_time: float = time.time()  # Timestamp of last save
-        self.last_content: str = ""  # Last saved content for comparison
-
-        # Autosave configuration
-        self.autosave_delay: int = self.config.get("autosave_delay", 60000)  # In milliseconds
-        self.master.after(self.autosave_delay, self.check_for_changes)  # Schedule autosave
+        self.file_path: Optional[str] = None
+        self.last_saved_time: float = time.time()
+        self.last_content: str = ""
 
         # Line number updating
-        self.update_line_number_delay: int = 100  # Delay for updating line numbers
+        self.update_line_number_delay: int = 100
         self.update_line_number_scheduled: bool = False
 
-        # Bind text widget events
-        self.update_status_bar()  # Initial status bar update
-        self.text.bind('<Return>', self.on_enter_pressed)
-        self.text.bind('<Tab>', self.on_tab_pressed)
-        self.text.bind('<BackSpace>', self.on_backspace)
-
         # Calendar window management
-        self.calendar_window: Optional[Toplevel] = None
+        self.calendar_window: Optional[Toplevel] = None  # Make sure this is initialized here
 
         # Enable drag and drop for files
         self.master.drop_target_register(tkdnd.DND_FILES)
-        self.master.dnd_bind('<<Drop>>', self.drop)  # Corrected method name from 'Drop' to 'drop'
+        self.master.dnd_bind('<<Drop>>', self.drop)
+
+        # Undo/Redo buffer configuration
+        self.max_undo_stack_size = 50  # You can adjust this to limit the number of undo actions
+        self.undo_stack = []
+        self.redo_stack = []
 
         self.master.update_idletasks()
         self.set_window_size()
 
     def drop(self, event):
-            """Handle file drag and drop event."""
-            file_path = event.data.replace('{', '').replace('}', '')
-            if os.path.isfile(file_path):
-                self.open_file_directly(file_path)
-            else:
-                messagebox.showerror("Error", "The dropped item is not a file.")
+        """
+        Handle file drag and drop event.
+
+        Checks if the dropped item is a file and opens it if so.
+        """
+        file_path = event.data.replace('{', '').replace('}', '')
+        if os.path.isfile(file_path):
+            self.open_file_directly(file_path)
+        else:
+            messagebox.showerror("Error", "The dropped item is not a file.")
+
+    def _bind_with_lambda(self, key, method):
+        self.text.bind(key, lambda e: method())
 
     def bind_keyboard_shortcuts(self) -> None:
-            """
-            Set up keyboard shortcuts for the text editor.
+        for key, method in [
+            ("<Control-b>", self.toggle_bold),
+            ("<Control-i>", self.toggle_italic),
+            ("<Control-u>", self.toggle_underline),
+            ("<Control-f>", self.open_find_replace_dialog),
+            ("<Control-s>", self.save),
+            ("<Control-z>", self.custom_undo),
+            ("<Control-y>", self.custom_redo),
+            ("<Control-l>", self.toggle_line_numbers)
+        ]:
+            self._bind_with_lambda(key, method)
 
-            This method binds various key combinations to their respective editor functions.
-            """
-            # Bind Ctrl+B to toggle bold text
-            self.text.bind("<Control-b>", lambda event: self.toggle_bold())
-            # Bind Ctrl+I to toggle italic text
-            self.text.bind("<Control-i>", lambda event: self.toggle_italic())
-            # Bind Ctrl+U to toggle underline text
-            self.text.bind("<Control-u>", lambda event: self.toggle_underline())
-            # Bind Ctrl+F to open the find and replace dialog
-            self.master.bind("<Control-f>", lambda event: self.open_find_replace_dialog())
-            # Bind Ctrl+S to save the current file
-            self.text.bind('<Control-s>', self.save)
-            # Bind Ctrl+Z for undo action
-            self.text.bind('<Control-z>', self.text.edit_undo)
-            # Bind Ctrl+Y for redo action
-            self.text.bind('<Control-y>', self.text.edit_redo)
-            # Bind Ctrl+L to toggle line numbers
-            self.master.bind('<Control-l>', self.toggle_line_numbers)
+    def _handle_undo_redo(self, stack_to_pop, stack_to_push):
+        if stack_to_pop:
+            current_state = self.text.get("1.0", tk.END)
+            stack_to_push.append(current_state)
+            new_state = stack_to_pop.pop()
+            self.text.delete("1.0", tk.END)
+            self.text.insert("1.0", new_state)
+            self.text.edit_modified(False)
+
+    def custom_undo(self):
+        self._handle_undo_redo(self.undo_stack, self.redo_stack)
+
+    def custom_redo(self):
+        self._handle_undo_redo(self.redo_stack, self.undo_stack)
+
+    def save_undo_state(self):
+        """Save current text state in the undo stack."""
+        current_state = self.text.get("1.0", tk.END)
+        if not self.undo_stack or current_state != self.undo_stack[-1]:
+            self.undo_stack.append(current_state)
+            if len(self.undo_stack) > self.max_undo_stack_size:
+                self.undo_stack.pop(0)  # Remove the oldest if buffer exceeds max size
+            self.redo_stack.clear()  # Clear redo stack when new action is performed
+
+    def clear_undo_redo(self):
+        """Clear both undo and redo stacks."""
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        messagebox.showinfo("Undo/Redo", "Undo/Redo history has been cleared.")
 
     def open_file_directly(self, file_path: str):
         """
         Open and read the contents of a file into the text widget.
 
-        This method attempts to:
-        1. Open the file with UTF-8 encoding.
-        2. Clear the current text in the editor.
-        3. Insert the file's content into the text widget.
-        4. Update editor's state with the file path and last save time.
-
-        :param file_path: The path to the file to be opened.
-        :raises PermissionError: If the file cannot be opened due to permission issues.
-        :raises FileNotFoundError: If the specified file does not exist.
-        :raises IOError: For other I/O related errors.
+        Also updates file-related attributes after reading the file.
         """
         try:
-            # Attempt to open and read the file
             with open(file_path, 'r', encoding='utf-8') as file:
                 content = file.read()
             
-            # Clear existing content in the text widget
             self.text.delete('1.0', 'end')
-            
-            # Insert the file's content at the beginning of the text widget
             self.text.insert('1.0', content)
             
-            # Update the current file path
             self.file_path = file_path
-            
-            # Store the content for comparison in future autosave checks
             self.last_content = content
-            
-            # Update the last saved time
             self.last_saved_time = time.time()
-            
-            # Refresh the status bar to reflect the new file information
             self.update_status_bar()
             
         except PermissionError:
-            # Handle permission issues when trying to read the file
             messagebox.showerror("Error", "Permission denied. You do not have the rights to read this file.")
-        
         except FileNotFoundError:
-            # File path provided does not exist
             messagebox.showerror("Error", "File not found. Please check the file path.")
-        
         except IOError as e:
-            # Catch any other I/O related exceptions
             messagebox.showerror("Error", f"An error occurred while reading the file: {e}")
 
     def open_calendar(self):
         """
         Open a calendar dialog if it doesn't exist or has been closed.
 
-        This method checks if the calendar window is already open, if not:
-        - Creates a new top-level window for the calendar.
-        - Configures the window's appearance with the current theme.
-        - Sets up the calendar widget with the current theme colors.
-        - Adds a 'Select' button to confirm date selection.
+        Manages the creation, setup, and button addition for the calendar window.
         """
         if self.calendar_window is None or not self.calendar_window.winfo_exists():
-            # Create a new top-level window for the calendar
-            self.calendar_window = Toplevel(self.master)
-            self.calendar_window.title("Calendar")
-            # Set the size of the calendar window
-            self.calendar_window.geometry("300x300")
-            # Apply the current theme background color to the window
-            self.calendar_window.configure(bg=self.current_theme["background"])
-            # Bind the window close event to a method for cleanup
-            self.calendar_window.protocol("WM_DELETE_WINDOW", self.on_close_calendar)
+            self.calendar_window = self._create_calendar_window()
+            self._setup_calendar_widget()
+            self._add_select_button()
 
-            # Initialize the Calendar widget
-            self.cal = Calendar(self.calendar_window, 
-                                selectmode='day', 
-                                year=2024, month=11, day=18, 
-                                background=self.current_theme["background"], 
-                                foreground=self.current_theme["text"])
-            # Pack the calendar to fill the window
-            self.cal.pack(expand=True, fill="both")
+    def _create_calendar_window(self) -> Toplevel:
+            """
+            Create and configure the calendar window.
 
-            # Create a confirm button styled with the current theme
-            confirm_btn = Button(self.calendar_window, 
-                                text="Select", 
-                                command=self.select_date,
-                                bg=self.current_theme["button_background"], 
-                                fg=self.current_theme["button_foreground"])
-            # Place the button in the window
-            confirm_btn.pack()
+            :return: The Toplevel window for the calendar
+            """
+            window = Toplevel(self.master)
+            window.title("Calendar")
+            window.geometry("300x300")
+            self.configure_widget(window, bg=self.current_theme["background"])
+            window.protocol("WM_DELETE_WINDOW", self.on_close_calendar)
+            return window
 
-    def select_date(self):
+    def _setup_calendar_widget(self) -> None:
+        """Initialize and configure the Calendar widget."""
+        self.cal = Calendar(self.calendar_window, 
+                            selectmode='day', 
+                            year=2024, month=11, day=18, 
+                            background=self.current_theme["background"], 
+                            foreground=self.current_theme["text"])
+        self.cal.pack(expand=True, fill="both")
+
+    def _add_select_button(self) -> None:
+        """
+        Create and add the 'Select' button to the calendar window.
+
+        Configures the button with the current theme colors.
+        """
+        confirm_btn = Button(self.calendar_window, 
+                             text="Select", 
+                             command=self.select_date)
+        self.configure_widget(confirm_btn, 
+                              bg=self.current_theme["button_background"], 
+                              fg=self.current_theme["button_foreground"])
+
+    def configure_widget(self, widget, bg=None, fg=None) -> None:
+        """
+        Configure widget background and foreground colors.
+
+        :param widget: The widget to be configured
+        :param bg: Background color
+        :param fg: Foreground color
+        """
+        if bg:
+            widget.configure(bg=bg)
+        if fg:
+            widget.configure(fg=fg)
+
+    def select_date(self) -> None:
         """
         Process the date selection from the calendar.
 
-        This method retrieves the selected date, shows a message with the date, 
-        and then closes the calendar window.
+        Displays the selected date and closes the calendar window.
         """
-        # Retrieve the selected date from the calendar widget
-        selected_date = self.cal.selection_get()
-        
-        # Display the selected date in an info message box
-        messagebox.showinfo("Selected Date", f"You selected: {selected_date}")
-        
-        # If the calendar window exists, close it
-        if self.calendar_window:
-            self.calendar_window.destroy()
+        try:
+            selected_date = self.cal.selection_get()
+            messagebox.showinfo("Selected Date", f"You selected: {selected_date}")
+            if self.calendar_window:
+                self.calendar_window.destroy()
+        except AttributeError:
+            messagebox.showerror("Error", "No date selected.")
 
-    def on_close_calendar(self):
-        """
-        Handle the closing of the calendar window.
+    def on_close_calendar(self) -> None:
+            """
+            Handle the closing of the calendar window.
 
-        This method ensures the calendar window is destroyed and the reference 
-        is set to None to free up resources.
-        """
-        # Check if the calendar window exists and is an attribute of this instance
-        if hasattr(self, 'calendar_window') and self.calendar_window:
-            # Destroy the calendar window
-            self.calendar_window.destroy()
-        
-        # Set the reference to None to ensure it's not used again
-        self.calendar_window = None
+            Destroys the window and clears the reference to free resources.
+            """
+            if hasattr(self, 'calendar_window') and self.calendar_window:
+                self.calendar_window.destroy()
+            self.calendar_window = None
 
     def load_themes(self) -> Dict[str, Dict[str, str]]:
         """
@@ -263,6 +299,30 @@ class TextEditor:
                 "light": {
                     "background": "#FFFFFF",
                     "text": "#000000",
+                    "word_count_background": "#FFFFFF",
+                    "word_count_foreground": "#000000",
+                    "line_numbers": "#CCCCCC",
+                    "selected_text_background": "#ADD6FF",
+                    "statusbar_background": "#F0F0F0",
+                    "statusbar_foreground": "#000000",
+                    "cursor": "#000000",
+                    "comments": "#808080",
+                    "strings": "#A31515",
+                    "keywords": "#0000FF",
+                    "functions": "#795E26",
+                    "variables": "#001080",
+                    "numbers": "#098658",
+                    "scrollbar_background": "#D3D3D3",
+                    "scrollbar_trough": "#F0F0F0",
+                    "scrollbar_border": "#A9A9A9",
+                    "scrollbar_arrow": "#000000",
+                    "menu_background": "#F0F0F0",
+                    "menu_foreground": "#000000",
+                    "menu_active_background": "#E0E0E0",
+                    "menu_active_foreground": "#000000",
+                    "menu_disabled_foreground": "#A3A37A7A7AA3",
+                    "highContrastBackground": "#000000",
+                    "highContrastForeground": "#FFFFFF"
                     # Here you would add other light theme properties like button colors, etc.
                 }
             }
@@ -277,8 +337,8 @@ class TextEditor:
         screen_height = self.master.winfo_screenheight()
 
         # Get window dimensions from config or use defaults
-        width = self.config.get("window_width", 800)
-        height = self.config.get("window_height", 600)
+        width = self.config_manager.get("window_width", 800)
+        height = self.config_manager.get("window_height", 600)
 
         # Calculate center position
         x = (screen_width - width) // 2
@@ -294,13 +354,14 @@ class TextEditor:
 
         If line numbers are currently visible, they are hidden. If hidden, they are displayed.
         """
-        # Check if the line number bar is currently visible
-        if self.line_number_bar.winfo_viewable():
+        if self.line_number_bar.winfo_ismapped():  # Check if it's mapped to the screen
             # If visible, remove it from the layout
             self.line_number_bar.pack_forget()
         else:
             # If not visible, add it to the left side of the text widget
-            self.line_number_bar.pack(side=tk.LEFT, fill=tk.Y)
+            self.line_number_bar.pack(side=tk.LEFT, fill=tk.Y, before=self.text)
+            self.update_line_numbers()  # Call this to update line numbers when shown
+
 
     def create_text_widget(self) -> None:
         """
@@ -312,28 +373,28 @@ class TextEditor:
         - Main text area with scroll capabilities
         - Text styling tags
         - Event bindings for scrolling, updating line numbers, and auto-indentation
+        - Adds padding to the text widget to prevent text from touching the edges
         """
         # Define the font to be used in the text widgets
         font = tkFont.Font(family=self.font_family, size=self.font_size)
 
-        # Set up the line number bar
-        # This bar displays line numbers and is disabled for user input
+        # Set up the line number bar, but hide it by default
         self.line_number_bar = Text(self.text_frame, 
                                     width=7, padx=4, 
                                     takefocus=0, border=0,
                                     background=self.current_theme["background"],
                                     state='disabled', wrap='none', 
                                     highlightthickness=0, font=font)
-        self.line_number_bar.pack(side=tk.LEFT, fill=tk.Y)
-        # Configure the text color of the line numbers
-        self.line_number_bar.config(fg=self.current_theme["text"])
+        # Hide the line number bar initially
+        self.line_number_bar.pack_forget()  # Changed from pack() to pack_forget()
 
         # Create the main text widget for editing
         self.text = Text(self.text_frame, 
                         background=self.current_theme["background"], 
                         font=font, fg=self.font_color, 
                         undo=True, wrap='none', 
-                        highlightthickness=0, bd=0)
+                        highlightthickness=0, bd=0,
+                        padx=10, pady=10)  # Add padding here
         self.text.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
 
         # Bind mouse wheel events for scrolling on both text and line number widgets
@@ -343,17 +404,17 @@ class TextEditor:
         # Configure text styling tags
         # Bold
         bold_font = font.copy()
-        bold_font.configure(weight="bold")
+        bold_font.configure(weight="bold", size=self.font_size)
         self.text.tag_configure("bold", font=bold_font)
         
         # Italic
         italic_font = font.copy()
-        italic_font.configure(slant="italic")
+        italic_font.configure(slant="italic", size=self.font_size)
         self.text.tag_configure("italic", font=italic_font)
         
         # Underline
         underline_font = font.copy()
-        underline_font.configure(underline=True)
+        underline_font.configure(underline=True, size=self.font_size)
         self.text.tag_configure("underline", font=underline_font)
 
         # Normal (default) font configuration
@@ -373,10 +434,10 @@ class TextEditor:
         self.text.tag_config('indent', tabs=('0.5c',))
 
         self.style.configure("Vertical.TScrollbar", 
-                                    background=self.current_theme.get("scrollbar_background", "#D3D3D3"),
-                                    troughcolor=self.current_theme.get("scrollbar_trough", "#FFFFFF"),
-                                    bordercolor=self.current_theme.get("scrollbar_border", "#A9A9A9"),
-                                    arrowcolor=self.current_theme.get("scrollbar_arrow", "#000000"))
+                            background=self.current_theme.get("scrollbar_background", "#D3D3D3"),
+                            troughcolor=self.current_theme.get("scrollbar_trough", "#FFFFFF"),
+                            bordercolor=self.current_theme.get("scrollbar_border", "#A9A9A9"),
+                            arrowcolor=self.current_theme.get("scrollbar_arrow", "#000000"))
 
         # Create the scrollbar with the custom style
         self.scrollbar = ttk.Scrollbar(self.text_frame, orient="vertical", style="Vertical.TScrollbar", command=self.text.yview)
@@ -393,6 +454,7 @@ class TextEditor:
         :param event: The Tkinter event object for the key press.
         :return: 'break' to prevent further event processing.
         """
+        self.save_undo_state()
         # Get the content of the current line
         current_line: str = self.text.get('insert linestart', 'insert lineend')
         # Calculate the number of spaces from the start of the line
@@ -411,8 +473,10 @@ class TextEditor:
         :param event: The Tkinter event object for the key press.
         :return: 'break' to prevent further event processing.
         """
+        self.save_undo_state()
         self.text.insert('insert', '    ')  # Insert four spaces for a tab
         return 'break'  # Prevent further event propagation
+
 
     def on_backspace(self, event: tk.Event) -> Optional[Literal['break']]:
         """
@@ -424,6 +488,8 @@ class TextEditor:
         :param event: The Tkinter event object for the key press.
         :return: 'break' to prevent further event processing if indentation was removed, None otherwise.
         """
+        self.save_undo_state()
+
         # Get cursor position
         cursor_pos = self.text.index('insert')
         
@@ -448,7 +514,7 @@ class TextEditor:
         
         # If cursor not at line start, let default backspace behavior occur
         return None
-
+        
     def on_scroll(self, *args: Any) -> None:
         """
         Synchronize the scrolling between the main text widget and the line number bar.
@@ -551,9 +617,10 @@ class TextEditor:
 
         # Edit menu
         edit_menu = Menu(menu_bar, tearoff=0, background=self.current_theme["menu_background"], foreground="#FFFFFF")
-        edit_menu.add_command(label="Undo | Ctrl+Z", command=self.text.edit_undo)
-        edit_menu.add_command(label="Redo | Ctrl+Y", command=self.text.edit_redo)
+        edit_menu.add_command(label="Undo | Ctrl+Z", command=self.custom_undo)
+        edit_menu.add_command(label="Redo | Ctrl+Y", command=self.custom_redo)
         edit_menu.add_command(label="Find and Replace", command=self.open_find_replace_dialog)
+        edit_menu.add_command(label="Clear Undo/Redo", command=self.clear_undo_redo)  # Add this
         menu_bar.add_cascade(label='Edit', menu=edit_menu)
 
         # Format menu
@@ -561,15 +628,10 @@ class TextEditor:
         format_menu.add_command(label='Font Size', command=self.change_font_size)
         format_menu.add_command(label='Change Font', command=self.change_font)
         format_menu.add_command(label='Font Color', command=self.change_font_color)
-        format_menu.add_command(label='Bold | Ctrl+B', command=self.toggle_bold)  # Corrected keyboard shortcut in label
-        format_menu.add_command(label='Italic | Ctrl+I', command=self.toggle_italic)  # Corrected keyboard shortcut in label
-        format_menu.add_command(label='Underline | Ctrl+U', command=self.toggle_underline)  # Corrected keyboard shortcut in label
+        format_menu.add_command(label='Bold | Ctrl+b', command=self.toggle_bold)  # Corrected keyboard shortcut in label
+        format_menu.add_command(label='Italic | Ctrl+i', command=self.toggle_italic)  # Corrected keyboard shortcut in label
+        format_menu.add_command(label='Underline | Ctrl+u', command=self.toggle_underline)  # Corrected keyboard shortcut in label
         menu_bar.add_cascade(label='Format', menu=format_menu)
-
-        # Customize menu
-        #customize_menu = Menu(menu_bar, tearoff=0, background=self.current_theme["menu_background"], foreground="#FFFFFF")
-        #customize_menu.add_command(label="Customize Theme", command=self.open_customize_dialog)
-        #menu_bar.add_cascade(label='Customize', menu=customize_menu)
 
         # View menu - Line Numbers
         view_menu_line_numbers = Menu(menu_bar, tearoff=0, background=self.current_theme["menu_background"], foreground="#FFFFFF")
@@ -580,6 +642,11 @@ class TextEditor:
         calendar_menu = Menu(menu_bar, tearoff=0, background=self.current_theme["menu_background"], foreground="#FFFFFF")
         calendar_menu.add_command(label="Open Calendar", command=self.open_calendar)
         menu_bar.add_cascade(label='Calendar', menu=calendar_menu)
+
+        # update status bar
+        update_menu = Menu(menu_bar, tearoff=0)
+        update_menu.add_command(label="Manual Status Update", command=self.manual_update_status)
+        menu_bar.add_cascade(label='Debug', menu=update_menu)
 
         # Bind the close window event to the close_file method
         self.master.protocol("WM_DELETE_WINDOW", self.close_file)
@@ -600,6 +667,23 @@ class TextEditor:
         dialog = Toplevel(self.master)
         dialog.title("Select Theme")
         
+        main_window_x = self.master.winfo_x()
+        main_window_y = self.master.winfo_y()
+        main_window_width = self.master.winfo_width()
+        main_window_height = self.master.winfo_height()
+
+        dialog_width = 300  # Width of the dialog, adjust as necessary
+        dialog_height = 100  # Height of the dialog, adjust as necessary
+
+        # Center dialog relative to main window
+        center_x = main_window_x + (main_window_width // 2) - (dialog_width // 2)
+        center_y = main_window_y + (main_window_height // 2) - (dialog_height // 2)
+
+        dialog.geometry(f"{dialog_width}x{dialog_height}+{center_x}+{center_y}")
+
+        # Apply the current theme background color to the window
+        dialog.configure(bg=self.current_theme["background"])
+
         # Loop through all available themes
         for theme_name, theme in self.themes.items():
             # Create a button for each theme, with the theme name as its label
@@ -608,64 +692,37 @@ class TextEditor:
                             text=theme_name.capitalize(), 
                             command=lambda t=theme: self.set_theme(t))
             button.pack(pady=5)  # Add padding between buttons for visual separation
-
+        """
         # Add a 'Close' button to dismiss the dialog
         close_button = Button(dialog, 
                             text="Close", 
                             command=dialog.destroy)  # Destroy the dialog window when clicked
         close_button.pack(pady=5)  # Add padding around the close button
-
-    def set_theme(self, theme: Dict[str, str]) -> None:
         """
-        Apply a new theme across the application, affecting the color scheme of all UI components.
+    def apply_theme(self, theme: Dict[str, str]) -> None:
+            """
+            Apply a theme to the entire application, affecting the color scheme of all UI components.
+            """
+            # Store the new theme for future reference
+            self.current_theme = theme
 
-        This method updates:
-        - The main window and text frame backgrounds,
-        - Colors of the text widget, line number bar, and status bar,
-        - The calendar window if open,
-        - Menu bar and potentially other menu items,
-        - Confirm button in the calendar window.
+            # Apply theme to main window components
+            self.master.configure(bg=theme["background"])  # Main window
+            self.text_frame.configure(bg=theme["background"])  # Text editor frame
 
-        :param theme: A dictionary with keys for different UI elements and their corresponding color values.
-        """
-        # Store the new theme for future reference
-        self.current_theme = theme
+            # Update text widgets
+            self.text.configure(bg=theme["background"], fg=theme["text"])
+            self.line_number_bar.configure(bg=theme["background"], fg=theme.get("line_numbers", theme["text"]))
+            self.status_bar.configure(bg=theme["background"], fg=theme.get("status_text", theme["text"]))
 
-        # Apply theme to main window components
-        self.master.configure(bg=theme["background"])  # Main window
-        self.text_frame.configure(bg=theme["background"])  # Text editor frame
+            # Update scrollbar style
+            self.style.configure("Vertical.TScrollbar", 
+                                background=theme.get("scrollbar_background", "#D3D3D3"),
+                                troughcolor=theme.get("scrollbar_trough", "#FFFFFF"),
+                                bordercolor=theme.get("scrollbar_border", "#A9A9A9"),
+                                arrowcolor=theme.get("scrollbar_arrow", "#000000"))
 
-        # Update the text widget
-        self.text.configure(bg=theme["background"], fg=theme["text"])  # Text color and background
-
-        # Update line number bar, using specific color if available, otherwise default to text color
-        self.line_number_bar.configure(bg=theme["background"], fg=theme.get("line_numbers", theme["text"]))
-
-        # Change status bar colors
-        self.status_bar.configure(bg=theme["background"], fg=theme.get("status_text", theme["text"]))
-
-        # Update calendar window if it's currently open
-        if self.calendar_window and self.calendar_window.winfo_exists():
-            # Change the background of the calendar window
-            self.calendar_window.configure(bg=theme["background"])
-            # If the calendar object exists, update its colors
-            if hasattr(self, 'cal'):
-                self.cal.config(background=theme["background"], foreground=theme["text"])
-
-        # Update menu bar colors
-        if hasattr(self, 'menu'):
-        # Update menu bar and menus
-            for menu in self.master.winfo_children():
-                if isinstance(menu, Menu):
-                    menu.configure(
-                        background=theme.get("menu_background", theme["background"]),
-                        foreground=theme.get("menu_foreground", theme["text"]),
-                        activebackground=theme.get("menu_active_background", theme["background"]),
-                        activeforeground=theme.get("menu_active_foreground", theme["text"]),
-                        disabledforeground=theme.get("menu_disabled_foreground", "#A3A3A3")
-                    )
-            
-            # Update the main menu bar
+            # Update menu bar colors
             menu_bar = self.master.cget('menu')
             if menu_bar:
                 menu_bar.configure(
@@ -675,47 +732,61 @@ class TextEditor:
                     activeforeground=theme.get("menu_active_foreground", theme["text"]),
                     disabledforeground=theme.get("menu_disabled_foreground", "#A3A3A3")
                 )
+                for menu in menu_bar.winfo_children():
+                    if isinstance(menu, Menu):
+                        menu.configure(
+                            background=theme.get("menu_background", theme["background"]),
+                            foreground=theme.get("menu_foreground", theme["text"]),
+                            activebackground=theme.get("menu_active_background", theme["background"]),
+                            activeforeground=theme.get("menu_active_foreground", theme["text"]),
+                            disabledforeground=theme.get("menu_disabled_foreground", "#A3A3A3")
+                        )
 
-            # Update dialogs and windows (like find/replace)
-        def update_dialog_theme(dialog: Toplevel):
-            """
-            Recursively update the theme of a dialog and all its children widgets.
+            # Update calendar window if it's currently open
+            if hasattr(self, 'calendar_window') and self.calendar_window:
+                if self.calendar_window.winfo_exists():
+                    self.calendar_window.configure(bg=theme["background"])
+                    if hasattr(self, 'cal'):
+                        self.cal.config(background=theme["background"], foreground=theme["text"])
 
-            :param dialog: The top-level dialog window to update.
-            """
-            # Set the background color of the dialog itself
-            dialog.configure(bg=theme["background"])
-            
-            # Iterate through all children of the dialog
-            for widget in dialog.winfo_children():
-                # Apply theme to basic widgets like Labels, Entries, and Buttons
-                if isinstance(widget, (Label, Entry, Button)):
-                    widget.configure(bg=theme["background"], fg=theme["text"])
-                # For Text widgets, change both background and foreground color
-                elif isinstance(widget, Text):
-                    widget.configure(bg=theme["background"], fg=theme["text"])
+            # Update dialogs and windows if open
+            if hasattr(self, 'find_replace_open') and self.find_replace_open:
+                for child in self.master.winfo_children():
+                    if isinstance(child, Toplevel) and child.title() == "Find and Replace":
+                        self._update_dialog_theme(child, theme)
+                        break
 
-        # Check if the find/replace dialog is open before attempting to update
-        if hasattr(self, 'find_replace_open') and self.find_replace_open:
-            # Search for the Find and Replace window among child windows of the main window
-            for child in self.master.winfo_children():
-                if isinstance(child, Toplevel) and child.title() == "Find and Replace":
-                    update_dialog_theme(child)
-                    break  # Exit the loop after updating the find/replace dialog
+            # Set the font color based on the theme
+            self.font_color = theme.get("text", self.font_color)
+            self.text.configure(fg=self.font_color)
 
-        # Update the font color for the main text area
-        self.font_color = theme.get("text", self.font_color)  # Use theme text color if specified, otherwise keep current
-        self.text.configure(fg=self.font_color)
+            # Refresh text styling tags to reflect the new theme
+            self.update_font()
 
-        # Refresh text styling tags to reflect the new theme
-        # Note: Ensure `update_font` method also updates all relevant tags with new theme settings
-        self.update_font()
+            # Configure indentation visualization
+            self.text.tag_configure('indent', tabs=('0.5c',), background=theme.get('indent_guide', theme['background']))
+            self.text.tag_configure('dedent', background=theme.get('indent_guide', theme['background']))
 
-        self.style.configure("Vertical.TScrollbar", 
-                            background=theme.get("scrollbar_background", "#D3D3D3"),
-                            troughcolor=theme.get("scrollbar_trough", "#FFFFFF"),
-                            bordercolor=theme.get("scrollbar_border", "#A9A9A9"),
-                            arrowcolor=theme.get("scrollbar_arrow", "#000000"))
+    def set_theme(self, theme: Dict[str, str]) -> None:
+        """
+        Apply a new theme to the application. This method is identical to apply_theme 
+        for consistency in terminology but can be used for dynamic theme changes.
+        """
+        self.apply_theme(theme)
+
+    def _update_dialog_theme(self, dialog: Toplevel, theme: Dict[str, str]) -> None:
+        """
+        Recursively update the theme of a dialog and all its children widgets.
+
+        :param dialog: The top-level dialog window to update.
+        :param theme: The theme dictionary to apply.
+        """
+        dialog.configure(bg=theme["background"])
+        for widget in dialog.winfo_children():
+            if isinstance(widget, (Label, Entry, Button)):
+                widget.configure(bg=theme["background"], fg=theme["text"])
+            elif isinstance(widget, Text):
+                widget.configure(bg=theme["background"], fg=theme["text"])
 
     def set_system_theme(self):
         """
@@ -828,6 +899,8 @@ class TextEditor:
         :param search_text: The text to find in the editor.
         :param replace_text: The text to replace with.
         """
+        self.save_undo_state()
+
         if not search_text:
             messagebox.showinfo("Info", "Please enter a search term.")
             return
@@ -868,33 +941,70 @@ class TextEditor:
         """
         self.toggle_style("underline")
 
-    def toggle_style(self, style):
+    def refocus_text(self):
+        self.text.focus_set()
+
+        # Call this when necessary, e.g., after theme change or window resize
+        self.master.bind("<Configure>", lambda e: self.refocus_text())
+
+    def toggle_style(self, style: str):
         """
-        Toggle a text style (like bold, italic, or underline) for the selected or current text.
+        Toggle a text style (like bold, italic, or underline) or combination for the selected or current text.
 
         :param style: The style to toggle ("bold", "italic", or "underline").
         """
+        print(f"Attempting to toggle {style}")  # Debug print
+        self.save_undo_state()
         try:
-            # Attempt to get the selection range
             start, end = self.text.index(tk.SEL_FIRST), self.text.index(tk.SEL_LAST)
         except tk.TclError:
-            # If no text is selected, apply style at the insertion point
             start = end = self.text.index(tk.INSERT)
 
-        # Get current tags at the start position
         current_tags = self.text.tag_names(start)
-        
         if style in current_tags:
-            # If the style is already applied, remove it
             self.text.tag_remove(style, start, end)
-            # Ensure any applied style is reset to normal
-            self.text.tag_add("normal", start, end)
         else:
-            # Remove all current styles from the selection
-            for tag in current_tags:
-                self.text.tag_remove(tag, start, end)
-            # Apply the new style
             self.text.tag_add(style, start, end)
+
+        # Update the font for the range to ensure correct rendering of combined styles
+        self.update_font_for_range(start, end)
+
+    def update_font_for_range(self, start: str, end: str) -> None:
+        """
+        Update the font for a given range in the text widget to reflect current tags.
+
+        This method ensures that the "combined" tag is both added when styles are present 
+        and removed when no longer needed.
+
+        :param start: Starting index of the range.
+        :param end: Ending index of the range.
+        """
+        print(f"Updating font for range {start} to {end}")  # Debug print
+        base_font = tkFont.Font(family=self.font_family, size=self.font_size)
+        try:
+            for index in self.text.tag_ranges("sel"):
+                font = base_font.copy()
+                tags = self.text.tag_names(index)
+                has_style = False
+
+                if "bold" in tags:
+                    font.configure(weight="bold")
+                    has_style = True
+                if "italic" in tags:
+                    font.configure(slant="italic")
+                    has_style = True
+                if "underline" in tags:
+                    font.configure(underline=True)
+                    has_style = True
+
+                if has_style:
+                    self.text.tag_configure("combined", font=font)
+                    self.text.tag_add("combined", index, self.text.index(f"{index}+1c"))
+                else:
+                    # Remove the "combined" tag if no style is applied
+                    self.text.tag_remove("combined", index, self.text.index(f"{index}+1c"))
+        except Exception as e:
+            print(f"Error updating font for range: {e}")
 
     def change_font_size(self):
         """
@@ -932,26 +1042,32 @@ class TextEditor:
 
     def update_font(self):
         """
-        Update the font settings for the text widget and all its style tags.
-
-        This method:
-        - Creates a new font with the current font family and size,
-        - Applies this font to the text widget,
-        - Reconfigures style tags to reflect the new font settings.
+        Update the font settings for the text widget and all its style tags including combinations.
         """
-        # Create a new font object with the current family and size
         font = tkFont.Font(family=self.font_family, size=self.font_size)
-        
-        # Set the base font for the text widget
         self.text.configure(font=font)
         
+        for tag in ["bold", "italic", "underline", "combined"]:
+            tag_font = font.copy()
+            if tag == "bold":
+                tag_font.configure(weight="bold")
+            elif tag == "italic":
+                tag_font.configure(slant="italic")
+            elif tag == "underline":
+                tag_font.configure(underline=True)
+            # For combined, we just set the base font here, specifics are handled by update_font_for_range
+            self.text.tag_configure(tag, font=tag_font)
+        
         # Update each tag configuration with the new font
-        for tag in ["bold", "italic", "underline", "normal"]:
-            self.text.tag_configure(tag, font=font.copy(
-                weight="bold" if tag == "bold" else "normal",
-                slant="italic" if tag == "italic" else "roman",
-                underline=True if tag == "underline" else False
-            ))
+        for tag in ["bold", "italic", "underline"]:
+            tag_font = font.copy()
+            if tag == "bold":
+                tag_font.configure(weight="bold")
+            elif tag == "italic":
+                tag_font.configure(slant="italic")
+            elif tag == "underline":
+                tag_font.configure(underline=True)
+            self.text.tag_configure(tag, font=tag_font)
 
     def update_indentation(self) -> None:
         """
@@ -982,36 +1098,6 @@ class TextEditor:
             else:
                 # If there's no indent or it's just whitespace, remove the 'indent' tag
                 self.text.tag_remove('indent', line_start)
-
-    def apply_theme(self, theme):
-        """
-        Apply a theme to the entire application by updating the background and foreground colors.
-
-        This method:
-        - Changes the background color of the main window, text frame, status bar, and line number bar.
-        - Updates the foreground color for text and status bar.
-        - Configures indentation visualization tags.
-        """
-        # Update background color for main components
-        self.master.configure(bg=theme["background"])  # Main window
-        self.text_frame.configure(bg=theme["background"])  # Text frame
-        self.text.configure(bg=theme["background"], fg=theme.get("text", "#000000"))  # Text widget
-        self.status_bar.configure(bg=theme["background"], fg=theme.get("text", "#000000"))  # Status bar
-        self.line_number_bar.configure(bg=theme["background"], fg=theme.get("line_numbers", "#CCCCCC"))  # Line number bar
-
-        # Set the font color based on the theme, falls back to current color if not specified
-        self.font_color = theme.get("text", self.font_color)
-        self.text.configure(fg=self.font_color)  # Apply the font color to the text widget
-
-        # Configure indentation visualization
-        # The 'indent' tag is used to visually represent indentation
-        self.text.tag_configure('indent', 
-                                tabs=('0.5c',), 
-                                background=theme.get('indent_guide', self.current_theme['background']))
-        
-        # The 'dedent' tag can be used for negative indentation, but here it's just setting the background
-        self.text.tag_configure('dedent', 
-                                background=theme.get('indent_guide', self.current_theme['background']))
 
     def set_font_color_based_on_theme(self):
         """
@@ -1078,7 +1164,11 @@ class TextEditor:
         self.status_bar = tk.Label(self.master, text="Ready", bd=0, relief=tk.FLAT, anchor=tk.W)
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
+    def manual_update_status(self):
+        self.update_status_bar()
+
     def update_status_bar(self):
+        print(f"Update status bar called at: {time.time()}")
         """
         Refresh the status bar with current file name, time, and word count.
 
@@ -1135,21 +1225,40 @@ class TextEditor:
             self.update_status_bar()
             messagebox.showinfo("Saved", f"File saved at {self.file_path}")
 
+            # Update autosave delay in config if changed
+            self.config_manager.set("autosave_delay", self.autosave_delay)
+
         except PermissionError:
             messagebox.showerror("Error", "Permission denied. You do not have the rights to write to this file.")
-        except IOError as e:
-            messagebox.showerror("Error", f"An error occurred while saving the file: {e}")
+        except FileNotFoundError:
+            messagebox.showerror("Error", "The file path specified does not exist.")
+        except OSError as e:
+            # This includes IOError but also other OS-related errors
+            if e.errno == 36:  # ENAMETOOLONG
+                messagebox.showerror("Error", "The file name is too long.")
+            elif e.errno == 28:  # ENOSPC
+                messagebox.showerror("Error", "No space left on device.")
+            else:
+                messagebox.showerror("Error", f"An OS error occurred while saving the file: {e.strerror}")
+        except UnicodeEncodeError:
+            messagebox.showerror("Error", "The file could not be saved due to encoding issues. Please ensure the text contains only valid characters for UTF-8.")
+        except Exception as e:
+            # Catch any other unexpected exceptions
+            messagebox.showerror("Error", f"An unexpected error occurred while saving the file: {str(e)}")
 
     def check_for_changes(self) -> None:
         """
         Periodically check for unsaved changes in the text editor and save if necessary.
         """
+        print("Checking for changes")
         current_content: str = self.text.get('1.0', tk.END)
         if current_content != self.last_content:
+            print("Changes detected, saving")
             self.save()
             self.last_content = current_content
         
         # Schedule next check
+        print(f"Scheduling next check in {self.autosave_delay} ms")
         self.master.after(self.autosave_delay, self.check_for_changes)
 
     def close_file(self) -> None:
