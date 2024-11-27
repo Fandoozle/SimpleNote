@@ -22,8 +22,9 @@ from tkinter import ttk
 
 from tkcalendar import Calendar
 from ConfigManager import ConfigManager
-from KeybindingsManager import bind_keyboard_shortcuts, bind_events_for_text_widget
+from KeybindingsManager import bind_keyboard_shortcuts
 from CalendarManager import open_calendar, close_calendar
+from StatusBar import StatusBar
 
 def load_config(config_file: str = "config.json") -> Dict[str, Union[int, str]]:
     """
@@ -86,6 +87,9 @@ class TextEditor:
                 # other dark theme properties...
             }
 
+        self.status_bar = StatusBar(master)
+        self.status_bar.update_status_bar(file_path=None, word_count=0)
+    
         # Autosave configuration
         self.autosave_delay: int = self.config_manager.get("autosave_delay", 60000)
         print(f"Autosave delay set to {self.autosave_delay}")
@@ -104,9 +108,6 @@ class TextEditor:
 
         self.create_text_widget()
         self.text.focus_set()  # Focus on the text widget for immediate input
-
-        self.create_status_bar()
-        self.update_status_bar()  # Initial update
 
         self.set_theme(self.current_theme)  # Call set_theme after all attributes are initialized
 
@@ -142,11 +143,11 @@ class TextEditor:
         self.master.update_idletasks()
         self.set_window_size()
 
+        self.set_theme(self.current_theme)  # Call set_theme after all attributes are initialized
+
+
         #logging
         self.setup_logging()
-
-        # Set up status bar scheduler
-        self.update_status_bar_scheduler()
 
     def setup_logging(self) -> None:
         """Configure logging to write errors to a file."""
@@ -154,29 +155,7 @@ class TextEditor:
         logging.basicConfig(filename='simple_note.log', level=logging.ERROR,
                             format='%(asctime)s - %(levelname)s - %(message)s')
 
-    def update_status_bar_scheduler(self) -> None:
-        """
-        Scheduler method to periodically update the status bar.
-        """
-        self.update_status_bar()
-        # Schedule the next update
-        self.master.after(1000, self.update_status_bar_scheduler)  # Schedule next update
-
-    def update_status_bar(self):
-        """
-        Refresh the status bar with current file name, time, and word count.
-
-        This method updates the status bar information and is called by the scheduler.
-        """
-        print(f"Update status bar called at: {time.time()}")
-        # Determine the file name to display
-        if hasattr(self, 'file_path') and self.file_path:
-            file_info = os.path.basename(self.file_path)
-        else:
-            file_info = "Untitled"
-        
-        # Update the label text with current information
-        self.status_bar.config(text=f"File: {file_info} - {time.strftime('%I:%M:%S %p')} - Words: {len(self.text.get('1.0', 'end-1c').split())}")
+    
 
     def open_file_directly(self, file_path: str):
             """
@@ -196,7 +175,7 @@ class TextEditor:
                 self.file_path = file_path
                 self.last_content = content
                 self.last_saved_time = time.time()
-                self.update_status_bar()
+                self.status_bar.update_status_bar(file_path, len(self.text.get('1.0', 'end-1c').split()))
                 
             except PermissionError as e:
                 messagebox.showerror("Error", "Permission denied. You do not have the rights to read this file.")
@@ -261,6 +240,7 @@ class TextEditor:
         self.undo_stack.clear()
         self.redo_stack.clear()
         messagebox.showinfo("Undo/Redo", "Undo/Redo history has been cleared.")
+
 
     """
     Calendar Functions
@@ -384,78 +364,85 @@ class TextEditor:
             self.update_line_numbers()  # Call this to update line numbers when shown
 
     def create_text_widget(self) -> None:
-            """
-            Create and configure the main text widget and associated elements like the line number bar.
+        """
+        Create and configure the main text widget and associated elements like the line number bar.
 
-            This method sets up:
-            - The font for text display
-            - Line number bar
-            - Main text area with scroll capabilities
-            - Text styling tags
-            - Event bindings for scrolling, updating line numbers, and auto-indentation
-            - Adds padding to the text widget to prevent text from touching the edges
-            """
-            # Define the font to be used in the text widgets
-            font = tkFont.Font(family=self.font_family, size=self.font_size)
+        This method sets up:
+        - The font for text display
+        - Line number bar
+        - Main text area with scroll capabilities
+        - Text styling tags
+        - Event bindings for scrolling, updating line numbers, and auto-indentation
+        - Adds padding to the text widget to prevent text from touching the edges
+        """
+        # Define the font to be used in the text widgets
+        font = tkFont.Font(family=self.font_family, size=self.font_size)
 
-            # Set up the line number bar, but hide it by default
-            self.line_number_bar = Text(self.text_frame, 
-                                        width=7, padx=4, 
-                                        takefocus=0, border=0,
-                                        background=self.current_theme["background"],
-                                        state='disabled', wrap='none', 
-                                        highlightthickness=0, font=font)
-            self.line_number_bar.pack_forget()  # Changed from pack() to pack_forget()
+        # Set up the line number bar, but hide it by default
+        self.line_number_bar = Text(self.text_frame, 
+                                    width=7, padx=4, 
+                                    takefocus=0, border=0,
+                                    background=self.current_theme["background"],
+                                    state='disabled', wrap='none', 
+                                    highlightthickness=0, font=font)
+        # Hide the line number bar initially
+        self.line_number_bar.pack_forget()  # Changed from pack() to pack_forget()
 
-            # Create the main text widget for editing
-            self.text = Text(self.text_frame, 
-                            background=self.current_theme["background"], 
-                            font=font, fg=self.font_color, 
-                            undo=True, wrap='none', 
-                            highlightthickness=0, bd=0,
-                            padx=10, pady=10)  # Add padding here
-            self.text.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+        # Create the main text widget for editing
+        self.text = Text(self.text_frame, 
+                        background=self.current_theme["background"], 
+                        font=font, fg=self.font_color, 
+                        undo=True, wrap='none', 
+                        highlightthickness=0, bd=0,
+                        padx=10, pady=10)  # Add padding here
+        self.text.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
 
-            # Bind mouse wheel events for scrolling on both text and line number widgets
-            bind_events_for_text_widget(self.text, 
-                                        self.on_scroll, 
-                                        self.delayed_update_line_numbers, 
-                                        self.on_enter_pressed, 
-                                        self.on_backspace)
-            self.line_number_bar.bind('<MouseWheel>', self.on_scroll)
+        # Bind mouse wheel events for scrolling on both text and line number widgets
+        self.text.bind('<MouseWheel>', self.on_scroll)
+        self.line_number_bar.bind('<MouseWheel>', self.on_scroll)
 
-            # Configure text styling tags
-            # Bold
-            bold_font = font.copy()
-            bold_font.configure(weight="bold", size=self.font_size)
-            self.text.tag_configure("bold", font=bold_font)
-            
-            # Italic
-            italic_font = font.copy()
-            italic_font.configure(slant="italic", size=self.font_size)
-            self.text.tag_configure("italic", font=italic_font)
-            
-            # Underline
-            underline_font = font.copy()
-            underline_font.configure(underline=True, size=self.font_size)
-            self.text.tag_configure("underline", font=underline_font)
+        # Configure text styling tags
+        # Bold
+        bold_font = font.copy()
+        bold_font.configure(weight="bold", size=self.font_size)
+        self.text.tag_configure("bold", font=bold_font)
+        
+        # Italic
+        italic_font = font.copy()
+        italic_font.configure(slant="italic", size=self.font_size)
+        self.text.tag_configure("italic", font=italic_font)
+        
+        # Underline
+        underline_font = font.copy()
+        underline_font.configure(underline=True, size=self.font_size)
+        self.text.tag_configure("underline", font=underline_font)
 
-            # Normal (default) font configuration
-            self.text.tag_configure("normal", font=font)
+        # Normal (default) font configuration
+        self.text.tag_configure("normal", font=font)
 
-            # Configure indentation tag for visual representation of code indentation
-            self.text.tag_config('indent', tabs=('0.5c',))
+        # Bind events for updating line numbers
+        # This will trigger on any key press or text modification
+        self.text.bind('<Any-KeyPress>', self.delayed_update_line_numbers)
+        self.text.bind('<<Modify>>', self.delayed_update_line_numbers)
 
-            self.style.configure("Vertical.TScrollbar", 
-                                background=self.current_theme.get("scrollbar_background", "#D3D3D3"),
-                                troughcolor=self.current_theme.get("scrollbar_trough", "#FFFFFF"),
-                                bordercolor=self.current_theme.get("scrollbar_border", "#A9A9A9"),
-                                arrowcolor=self.current_theme.get("scrollbar_arrow", "#000000"))
+        # Bind key events for auto-indentation
+        self.text.bind('<Return>', self.on_enter_pressed)
+        #self.text.bind('<Tab>', self.on_tab_pressed)
+        self.text.bind('<BackSpace>', self.on_backspace)
 
-            # Create the scrollbar with the custom style
-            self.scrollbar = ttk.Scrollbar(self.text_frame, orient="vertical", style="Vertical.TScrollbar", command=self.text.yview)
-            self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y, expand=True)
-            self.text.config(yscrollcommand=self.scrollbar.set)
+        # Configure indentation tag for visual representation of code indentation
+        self.text.tag_config('indent', tabs=('0.5c',))
+
+        self.style.configure("Vertical.TScrollbar", 
+                            background=self.current_theme.get("scrollbar_background", "#D3D3D3"),
+                            troughcolor=self.current_theme.get("scrollbar_trough", "#FFFFFF"),
+                            bordercolor=self.current_theme.get("scrollbar_border", "#A9A9A9"),
+                            arrowcolor=self.current_theme.get("scrollbar_arrow", "#000000"))
+
+        # Create the scrollbar with the custom style
+        self.scrollbar = ttk.Scrollbar(self.text_frame, orient="vertical", style="Vertical.TScrollbar", command=self.text.yview)
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y, expand=True)
+        self.text.config(yscrollcommand=self.scrollbar.set)
 
     def on_enter_pressed(self, event: tk.Event) -> Literal['break']:
         """
@@ -764,8 +751,8 @@ class TextEditor:
                                 arrowcolor=theme.get("scrollbar_arrow", "#000000"))
 
             # Update menu bar colors
-            menu_bar = self.master.cget('menu')
-            if menu_bar:
+            menu_bar = self.master.cget('menu')  # This should return the Menu object
+            if isinstance(menu_bar, Menu):  # Check if it's actually a Menu object
                 menu_bar.configure(
                     background=theme.get("menu_background", theme["background"]),
                     foreground=theme.get("menu_foreground", theme["text"]),
@@ -782,6 +769,8 @@ class TextEditor:
                             activeforeground=theme.get("menu_active_foreground", theme["text"]),
                             disabledforeground=theme.get("menu_disabled_foreground", "#A3A3A3")
                         )
+            else:
+                print("Menu bar not found or not a Menu object")
 
             # Update calendar window if it's currently open
             if hasattr(self, 'calendar_window') and self.calendar_window:
@@ -1193,7 +1182,7 @@ class TextEditor:
             self.file_path = file_path
             self.last_content = content
             self.last_saved_time = time.time()
-            self.update_status_bar()
+            self.status_bar.update_status_bar()()
         
         except PermissionError:
             messagebox.showerror("Error", "Permission denied. You do not have the rights to read this file.")
@@ -1202,35 +1191,6 @@ class TextEditor:
         except IOError as e:
             messagebox.showerror("Error", f"An error occurred while reading the file: {e}")   
 
-    def create_status_bar(self):
-        """
-        Add a status bar at the bottom of the main window to display file information and time.
-        """
-        self.status_bar = tk.Label(self.master, text="Ready", bd=0, relief=tk.FLAT, anchor=tk.W)
-        self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-
-    def manual_update_status(self):
-        self.update_status_bar()
-
-    def update_status_bar(self):
-        print(f"Update status bar called at: {time.time()}")
-        """
-        Refresh the status bar with current file name, time, and word count.
-
-        This method is called periodically to update the status bar information.
-        """
-        # Determine the file name to display
-        if hasattr(self, 'file_path') and self.file_path:
-            file_info = os.path.basename(self.file_path)
-        else:
-            file_info = "Untitled"
-        
-        # Update the label text with current information
-        self.status_bar.config(text=f"File: {file_info} - {time.strftime('%I:%M:%S %p')} - Words: {len(self.text.get('1.0', 'end-1c').split())}")
-        
-        # Schedule next update in 1 second
-        self.master.after(1000, self.update_status_bar)
-
     def save_and_update_status(self, event=None):
         """
         Save the current file and then update the status bar.
@@ -1238,7 +1198,7 @@ class TextEditor:
         :param event: Optional Tkinter event, typically bound to a key or menu action.
         """
         self.save()
-        self.update_status_bar()
+        self.status_bar.update_status_bar(self.file_path, len(self.text.get('1.0', 'end-1c').split()))
 
     def save(self, event=None):
         """
@@ -1267,7 +1227,7 @@ class TextEditor:
             # Update last save information
             self.last_saved_time = time.time()
             self.last_content = content
-            self.update_status_bar()
+            self.status_bar.update_status_bar(self.file_path, len(self.text.get('1.0', 'end-1c').split()))
             messagebox.showinfo("Saved", f"File saved at {self.file_path}")
 
             # Update autosave delay in config if changed
